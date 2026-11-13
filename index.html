@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Общо рисуване</title>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,sans-serif;background:#1e1e2e;color:#eee;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:12px}
+  h1{font-size:1.3rem;margin:4px 0 10px}
+  .card{background:#2a2a3d;border-radius:12px;padding:16px;max-width:420px;width:100%;text-align:center}
+  button{background:#6c5ce7;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:1rem;cursor:pointer;margin:4px}
+  button.sec{background:#444}
+  input[type=text]{padding:10px;font-size:1.2rem;border-radius:8px;border:0;width:130px;text-align:center;text-transform:uppercase}
+  #app{display:none;width:100%;max-width:900px;flex-direction:column;align-items:center}
+  #bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;margin-bottom:8px}
+  #code{font-size:1.4rem;font-weight:bold;letter-spacing:3px;color:#ffd93d}
+  canvas{width:100%;background:#fff;border-radius:10px;touch-action:none;cursor:crosshair}
+  #status{font-size:.9rem;opacity:.85;margin:6px 0;min-height:1.2em}
+  #colors button{width:32px;height:32px;padding:0;border-radius:50%;border:3px solid transparent}
+  #colors button.on{border-color:#fff}
+</style>
+</head>
+<body>
+<h1>🎨 Общо рисуване</h1>
+
+<div class="card" id="lobby">
+  <p>Рисувайте заедно на няколко устройства в реално време.</p>
+  <button id="btnHost">Създай стая</button>
+  <p>или въведи код на стая:</p>
+  <input type="text" id="joinCode" maxlength="4" placeholder="КОД">
+  <button id="btnJoin">Влез</button>
+  <div id="lobbyStatus" style="min-height:1.4em;margin-top:8px"></div>
+</div>
+
+<div id="app">
+  <div id="bar">
+    <span>Стая: <span id="code"></span></span>
+    <span id="count">👥 1</span>
+    <span id="colors"></span>
+    <input type="range" id="size" min="2" max="30" value="6">
+    <button class="sec" id="btnClear">Изчисти</button>
+  </div>
+  <canvas id="cv" width="1000" height="700"></canvas>
+  <div id="status"></div>
+</div>
+
+<script>
+const PREFIX = 'bgdraw-uchilishte-';
+const COLORS = ['#000000','#e74c3c','#f39c12','#2ecc71','#3498db','#9b59b6','#ffffff'];
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let peer, isHost = false, conns = [], hostConn = null, history = [];
+let color = COLORS[0];
+
+// ---- палитра ----
+COLORS.forEach((c, i) => {
+  const b = document.createElement('button');
+  b.style.background = c; if (i === 0) b.className = 'on';
+  b.onclick = () => { color = c; document.querySelectorAll('#colors button').forEach(x => x.className = ''); b.className = 'on'; };
+  $('colors').appendChild(b);
+});
+
+// ---- рисуване ----
+function drawSeg(s) {
+  ctx.strokeStyle = s.c; ctx.lineWidth = s.w; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(s.x0 * cv.width, s.y0 * cv.height);
+  ctx.lineTo(s.x1 * cv.width, s.y1 * cv.height);
+  ctx.stroke();
+}
+function clearCanvas() { ctx.clearRect(0, 0, cv.width, cv.height); }
+
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+}
+let last = null;
+cv.addEventListener('pointerdown', e => { cv.setPointerCapture(e.pointerId); last = pos(e); emitSeg(last, last); });
+cv.addEventListener('pointermove', e => { if (!last) return; const p = pos(e); emitSeg(last, p); last = p; });
+['pointerup','pointercancel'].forEach(ev => cv.addEventListener(ev, () => last = null));
+
+function emitSeg(a, b) {
+  const s = { t: 'seg', x0: a.x, y0: a.y, x1: b.x, y1: b.y, c: color, w: +$('size').value };
+  drawSeg(s); history.push(s); send(s);
+}
+$('btnClear').onclick = () => { clearCanvas(); history = []; send({ t: 'clear' }); };
+
+// ---- мрежа ----
+function send(msg, except) {
+  if (isHost) conns.forEach(c => c !== except && c.open && c.send(msg));
+  else if (hostConn && hostConn.open) hostConn.send(msg);
+}
+function handle(msg, from) {
+  if (msg.t === 'seg') { drawSeg(msg); history.push(msg); }
+  else if (msg.t === 'clear') { clearCanvas(); history = []; }
+  else if (msg.t === 'hist') { msg.h.forEach(drawSeg); history = msg.h; }
+  else if (msg.t === 'n') { $('count').textContent = '👥 ' + msg.n; }
+  if (isHost && (msg.t === 'seg' || msg.t === 'clear')) send(msg, from);
+}
+function broadcastCount() {
+  const n = conns.filter(c => c.open).length + 1;
+  $('count').textContent = '👥 ' + n;
+  send({ t: 'n', n });
+}
+function showApp(code) {
+  $('lobby').style.display = 'none'; $('app').style.display = 'flex';
+  $('code').textContent = code;
+}
+
+function randCode() { return Array.from({length:4}, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random()*32)]).join(''); }
+
+function host() {
+  const code = randCode();
+  $('lobbyStatus').textContent = 'Свързване...';
+  peer = new Peer(PREFIX + code);
+  peer.on('open', () => {
+    isHost = true; showApp(code);
+    $('status').textContent = 'Дайте кода „' + code + '“ на другите устройства.';
+  });
+  peer.on('connection', c => {
+    c.on('open', () => { conns.push(c); c.send({ t: 'hist', h: history }); broadcastCount(); });
+    c.on('data', m => handle(m, c));
+    c.on('close', () => { conns = conns.filter(x => x !== c); broadcastCount(); });
+  });
+  peer.on('error', err => {
+    if (err.type === 'unavailable-id') host(); // кодът е зает — опитай нов
+    else $('lobbyStatus').textContent = 'Грешка: ' + err.type;
+  });
+}
+
+function join() {
+  const code = $('joinCode').value.trim().toUpperCase();
+  if (code.length !== 4) { $('lobbyStatus').textContent = 'Въведи 4-символен код.'; return; }
+  $('lobbyStatus').textContent = 'Свързване...';
+  peer = new Peer();
+  peer.on('open', () => {
+    hostConn = peer.connect(PREFIX + code, { reliable: true });
+    hostConn.on('open', () => { showApp(code); $('status').textContent = 'Свързан си! Рисувай.'; });
+    hostConn.on('data', m => handle(m));
+    hostConn.on('close', () => { $('status').textContent = '⚠️ Връзката със стаята е прекъсната.'; });
+  });
+  peer.on('error', err => {
+    $('lobbyStatus').textContent = err.type === 'peer-unavailable' ? 'Няма такава стая.' : 'Грешка: ' + err.type;
+  });
+}
+$('btnHost').onclick = host;
+$('btnJoin').onclick = join;
+</script>
+</body>
+</html>
